@@ -27,6 +27,8 @@ Every scan:
 5. One trade per family per game - the pair with the best EV. Re-checked at the books before
    it is "placed", like arb_bot.
 Half-point lines only (whole lines can push, which this math doesn't cover).
+The dashboard also lists the closest candidates of the latest scan - the best middle per
+family by expected profit, placed or not - to show how near the books come.
 
 Tracking: before kickoff each leg is re-checked every scan (odds cut / bet pulled / game
 removed or postponed), like the arb bot. After the game the trade waits for the result:
