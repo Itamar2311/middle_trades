@@ -12,7 +12,7 @@ lines, both bets win; otherwise one wins and roughly pays back the stake.
     scores 22 or more -> only the over wins    -> -$4.50
 
 Every scan:
-1. Collect every bet at every book, match the same game across books (as in sports_arb).
+1. scanner.py collects every bet at every book and matches the same game across books.
 2. For every family of bets (same period, team/player, stat - e.g. "Curry points, full game")
    take the best price for each side at each line, and pair an over/home side at line L1 with
    an under/away side further along, so both can win.
@@ -35,37 +35,29 @@ removed or postponed), like the arb bot. After the game the trade waits for the 
 settling by the final score is not built yet, so profit is shown as worst / expected / best.
 
 Files: middle_trades.json (source of truth), middle_trades.csv, middle_dashboard.html, middle_log.txt
-Run:   python middle_bot.py           scan forever, one scan every CYCLE_MIN minutes
-       python middle_bot.py --once    one scan
+Run through scanner.py, which fetches the books once per scan for this bot and arb_bot:
+       python scanner.py           scan forever        python scanner.py --once    one scan
 """
-import argparse
 import csv
 import json
 import os
-import subprocess
-import sys
-import time
-import traceback
 from collections import defaultdict
-from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 from itertools import product
 from math import ceil, floor
 from statistics import mean
 
 import books
-from books import team_score
+from arb_bot import match_games, notify, now_utc, oriented, stamp   # shared with the arb bot
 
 # --- settings -------------------------------------------------------------
 STAKE = 100
-MAX_RISK = 5.0              # worst case (only one bet wins) may lose at most this many dollars ...
+MAX_RISK = 10.0             # worst case (only one bet wins) may lose at most this many dollars ...
 MIN_EV = 0.5                # ... and only if the expected profit is at least this
 MAX_RISK_NO_EV = 1.0        # when the chance of the middle can't be estimated: lose at most this
 SHOW_CANDIDATES = 25        # dashboard also lists the best middles that didn't qualify ...
 MIN_LEG_ODDS = 1.25         # ... skipping lopsided pairs (a 1.01 favourite + a long shot isn't a middle)
 MAX_WORST = 8.0             # worst case better than +8% = almost surely two different bets matched
-CYCLE_MIN = 5
-MATCH_MINUTES = 20
 CUT_FLAG_PTS = 0.08
 POSTPONE_HOURS = 12
 GAME_HOURS = {"soccer": 2.5, "basketball": 3, "hockey": 3.5, "football": 4, "baseball": 4,
@@ -91,45 +83,14 @@ STAT_NAMES = {"main": "", "games": "games", "corners": "corners", "cards": "card
               "saves": "saves", "goals": "goals"}
 
 
-def now_utc():
-    return datetime.now(timezone.utc)
 
 
-def stamp(dt=None):
-    return (dt or datetime.now()).strftime("%Y-%m-%d %H:%M")
 
 
-# --- matching (same as sports_arb) ------------------------------------------
-def match_games(events):
-    games = []
-    for e in sorted(events, key=lambda e: e.start):
-        for g in games:
-            ref = g["ref"]
-            if e.book in g["books"] or e.sport != ref.sport or abs(e.start - ref.start) > timedelta(minutes=MATCH_MINUTES):
-                continue
-            straight = min(team_score(e.home, ref.home), team_score(e.away, ref.away))
-            crossed = min(team_score(e.home, ref.away), team_score(e.away, ref.home))
-            if straight > 0 and straight >= crossed:
-                g["books"][e.book] = (e, False)
-                break
-            if crossed > 0:
-                g["books"][e.book] = (e, True)
-                break
-        else:
-            games.append({"ref": e, "books": {e.book: (e, False)}})
-    return [g for g in games if len(g["books"]) >= 2]
 
 
-def flip(o):
-    swap = {"home": "away", "away": "home"}
-    return books.Offer(o.book, o.event_id, o.period, swap.get(o.scope, o.scope), o.stat, o.kind,
-                       -o.line if o.kind == "hcp" else o.line,
-                       swap.get(o.outcome, o.outcome) if o.kind in ("ml2", "ml3", "hcp") else o.outcome,
-                       o.odds, o.ref)
 
 
-def oriented(offers, flipped):
-    return [flip(o) for o in offers] if flipped else offers
 
 
 # --- middle math ----------------------------------------------------------
@@ -327,23 +288,6 @@ def open_trade(g, fam, low, high, n, trades):
     return t
 
 
-def notify(title, body):
-    """Windows toast notification via PowerShell (no extra packages needed)."""
-    print(f"  >> {title} | {body.splitlines()[0]}")
-    if not NOTIFY or sys.platform != "win32":
-        return
-    from xml.sax.saxutils import escape
-    xml = (f"<toast><visual><binding template='ToastGeneric'><text>{escape(title)}</text>"
-           f"<text>{escape(body)}</text></binding></visual></toast>").replace("'", "''")
-    script = (
-        "[Windows.UI.Notifications.ToastNotificationManager, Windows.UI.Notifications, ContentType = WindowsRuntime] | Out-Null;"
-        "$x = [Windows.Data.Xml.Dom.XmlDocument, Windows.Data.Xml.Dom.XmlDocument, ContentType = WindowsRuntime]::new();"
-        f"$x.LoadXml('{xml}');"
-        "$id = '{1AC14E77-02E7-4E5D-B744-2EB1AE5198B7}\\WindowsPowerShell\\v1.0\\powershell.exe';"
-        "[Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier($id)"
-        ".Show([Windows.UI.Notifications.ToastNotification]::new($x))")
-    subprocess.Popen(["powershell", "-NoProfile", "-Command", script],
-                     creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
 
 
 def describe(t):
@@ -543,26 +487,20 @@ def log(msg):
         f.write(msg + "\n")
 
 
-# --- main -----------------------------------------------------------------
-def scan(book_list, trades):
-    t0 = time.time()
-    books.counts.clear()
-    with ThreadPoolExecutor(len(book_list)) as ex:
-        results = list(ex.map(lambda b: (b, b.scan()), book_list))
-    events, offers, errors = [], [], []
-    for b, (e, o, err) in results:
-        events += e
-        offers += o
-        errors += [f"{b.name} {x}" for x in err]
-    by_event = defaultdict(list)
-    for o in offers:
-        by_event[(o.book, o.event_id)].append(o)
-    games = match_games(events)
-    middles = find_middles(games, by_event)
-    near = [m for m in find_middles(games, by_event, strict=False) if m[4]["expected"] is not None]
-    near = [candidate_row(*m) for m in sorted(near, key=lambda m: -m[4]["expected"])[:SHOW_CANDIDATES]]
+# --- one scan --------------------------------------------------------------
+def configure(out_dir):
+    """Write this bot's files into out_dir (scanner.py points it at the middle_trades folder)."""
+    global STATE, CSV_FILE, DASHBOARD, LOG
+    STATE, CSV_FILE, DASHBOARD, LOG = (os.path.join(out_dir, f) for f in
+                                       ("middle_trades.json", "middle_trades.csv", "middle_dashboard.html",
+                                        "middle_log.txt"))
 
-    by_book = {b.name: b for b in book_list}
+
+def process(data, trades):
+    """One scan's data (from scanner.collect) -> new paper trades, tracking, files. Returns a summary."""
+    middles = find_middles(data.games, data.by_event)
+    near = [m for m in find_middles(data.games, data.by_event, strict=False) if m[4]["expected"] is not None]
+    near = [candidate_row(*m) for m in sorted(near, key=lambda m: -m[4]["expected"])[:SHOW_CANDIDATES]]
     taken = {t["key"] for t in trades}
     new = []
     for g, fam, low, high, n in sorted(middles, key=lambda m: -(m[4]["expected"] or -99)):
@@ -572,9 +510,9 @@ def scan(book_list, trades):
         taken.add(tk)
         try:
             # fair probabilities from this scan; they don't move in the seconds the re-check takes
-            ok = confirm(g, fam, low, high, by_book, probs_for(g, fam, low, high, by_event))
+            ok = confirm(g, fam, low, high, data.by_book, probs_for(g, fam, low, high, data.by_event))
         except Exception as ex:
-            errors.append(f"confirm: {ex}")
+            data.errors.append(f"middle confirm: {ex}")
             continue
         if ok:
             new.append(open_trade(g, fam, ok[0], ok[1], ok[2], trades))
@@ -584,15 +522,11 @@ def scan(book_list, trades):
     else:
         for t in new:
             notify(f"Middle placed: {t['middle']} ({t['p_middle_pct'] or '?'}%)", describe(t))
-    track(trades, events, by_event)
+    track(trades, data.events, data.by_event)
     save(trades)
     write_csv(trades)
     write_dashboard(trades, stamp(), near)
-    per_book = ", ".join(f"{b}: {sum(e.book == b for e in events)} games/{sum(o.book == b for o in offers)} bets"
-                         for b in by_book)
-    log(f"{stamp()}  {time.time() - t0:.0f}s  {per_book}  | {len(games)} matched games, "
-        f"{len(middles)} middles seen, {len(new)} placed, requests {dict(books.counts)}"
-        + (f"  | {len(errors)} errors: {errors[:3]}" if errors else ""))
+    return f"{len(middles)} middles seen, {len(new)} placed"
 
 
 def probs_for(g, fam, low, high, by_event):
@@ -604,24 +538,3 @@ def probs_for(g, fam, low, high, by_event):
             if (o.period, o.scope, o.stat, o.kind) == fam and o.line in (low.line, high.line):
                 at[o.line].append(o)
     return fair_prob(at[low.line], LOW_SIDE[kind]), fair_prob(at[high.line], LOW_SIDE[kind])
-
-
-def main():
-    p = argparse.ArgumentParser(description="Middle paper trading across Ontario sportsbooks")
-    p.add_argument("--once", action="store_true", help="one scan, then exit")
-    args = p.parse_args()
-    book_list = books.all_books()
-    trades = load()
-    while True:
-        start = time.time()
-        try:
-            scan(book_list, trades)
-        except Exception:
-            log(f"{stamp()}  scan failed:\n{traceback.format_exc()}")
-        if args.once:
-            break
-        time.sleep(max(30, CYCLE_MIN * 60 - (time.time() - start)))
-
-
-if __name__ == "__main__":
-    main()

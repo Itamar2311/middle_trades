@@ -37,9 +37,9 @@ class MiddleMath(unittest.TestCase):
         self.assertAlmostEqual(n["worst"], -0.5, delta=0.01)
 
     def test_too_risky_is_skipped(self):
-        games, by_event = game(o("A", "ou", 19.5, "over", 1.80), o("B", "ou", 21.5, "under", 1.80),
+        games, by_event = game(o("A", "ou", 19.5, "over", 1.70), o("B", "ou", 21.5, "under", 1.70),
                                *pinnacle(19.5, 0.64), *pinnacle(21.5, 0.52))
-        self.assertEqual(m.find_middles(games, by_event), [])   # worst -10, beyond MAX_RISK
+        self.assertEqual(m.find_middles(games, by_event), [])   # worst about -10.40 to -15, beyond MAX_RISK
 
     def test_lines_must_leave_a_gap(self):
         games, by_event = game(o("A", "ou", 21.5, "over", 2.2), o("B", "ou", 19.5, "under", 2.2))
