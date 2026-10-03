@@ -1,0 +1,7 @@
+__pycache__/
+.idea/
+middle_trades.json
+middle_trades.csv
+middle_dashboard.html
+middle_log.txt
+*.tmp
